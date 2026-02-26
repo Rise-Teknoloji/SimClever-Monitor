@@ -1,4 +1,38 @@
-#include "lcd_bsp.h" 
+#include "lcd_bsp.h"
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+
+/* --- BLE AYARLARI --- */
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
+BLEServer*         pServer         = NULL;
+BLECharacteristic* pCharacteristic = NULL;
+bool  bleConnected = false;
+int   bleBasinc    = -1;   // -1 = BLE'den veri yok, sensörü kullan
+
+/* --- BLE CALLBACK'LER --- */
+class ServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* s)    { bleConnected = true;  Serial.println("BLE: Baglandi"); }
+  void onDisconnect(BLEServer* s) {
+    bleConnected = false;
+    bleBasinc    = -1;
+    Serial.println("BLE: Koptu, reklam yeniden basliyor...");
+    s->startAdvertising();  // Tekrar keşfedilebilir ol
+  }
+};
+
+class BasincCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* c) {
+    String val = c->getValue();
+    if (val.length() > 0) {
+      bleBasinc = val.toInt();
+      Serial.print("BLE Basinc: ");
+      Serial.println(bleBasinc);
+    }
+  }
+};
 
 /* --- PIN TANIMLAMALARI --- */
 const int sensorPin = 7;   // Basınç Sensörü (IO7)
@@ -18,18 +52,42 @@ bool ledDurum = false;           // LED'in anlık durumu (açık/kapalı)
 
 void setup() {
   Serial.begin(115200);
+  delay(500); // Serial Monitor'ün açılması için bekle
   
   // Basınç Eğim Hesabı
   slope = pressureMaxRef_mmHg / (voltageMaxRef - voltageZero);
-  
-  // Ekranı Başlat
-  lcd_lvgl_Init();
-  
+
   // Pin Modları
   pinMode(sensorPin, INPUT);
   pinMode(ledPin, OUTPUT);
   digitalWrite(ledPin, LOW);
-  pinMode(bataryaPin, INPUT); // Pil okuma pini
+  pinMode(bataryaPin, INPUT);
+
+  Serial.printf("Heap (baslangic): %d byte\n", ESP.getFreeHeap());
+
+  // --- BLE Peripheral Başlat (EKRANDAN ÖNCE!) ---
+  BLEDevice::init("SimClever");
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new ServerCallbacks());
+
+  BLEService* pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID,
+                      BLECharacteristic::PROPERTY_WRITE
+                    );
+  pCharacteristic->setCallbacks(new BasincCallback());
+  pService->start();
+
+  BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->start();
+  Serial.println("BLE: SimClever yayinda!");
+  Serial.printf("Heap (BLE sonrasi): %d byte\n", ESP.getFreeHeap());
+
+  // --- Ekranı Başlat (BLE'den SONRA) ---
+  lcd_lvgl_Init();
+  Serial.printf("Heap (LCD sonrasi): %d byte\n", ESP.getFreeHeap());
 }
 
 void loop() {
@@ -53,14 +111,21 @@ void loop() {
   }
 
   // ==========================================
-  // 1.5  LED BLINK (Basınç Aralığına Göre Hız)
+  // 1.5  AKTİF BASINÇ DEĞERİ SEÇİMİ
+  // ==========================================
+  // BLE bağlıysa ve değer geldiyse → BLE değerini kullan
+  // Değilse → sensör değerini kullan
+  float aktifBasinc = (bleBasinc >= 0) ? (float)bleBasinc : pressure_mmHg;
+
+  // ==========================================
+  // 1.6  LED BLINK (Basınç Aralığına Göre Hız)
   // ==========================================
   int blinkInterval = 0; // 0 = LED kapalı
 
-  if      (pressure_mmHg >= 160) blinkInterval = 60;   // Çok hızlı
-  else if (pressure_mmHg >= 120) blinkInterval = 120;  // Hızlı
-  else if (pressure_mmHg >=  80) blinkInterval = 250;  // Orta
-  else if (pressure_mmHg >=  40) blinkInterval = 500;  // Yavaş
+  if      (aktifBasinc >= 160) blinkInterval = 60;   // Çok hızlı
+  else if (aktifBasinc >= 120) blinkInterval = 120;  // Hızlı
+  else if (aktifBasinc >=  80) blinkInterval = 250;  // Orta
+  else if (aktifBasinc >=  40) blinkInterval = 500;  // Yavaş
 
   if (blinkInterval > 0) {
     if (millis() - sonLedToggle >= (unsigned long)blinkInterval) {
@@ -118,7 +183,7 @@ void loop() {
   // 3. EKRANI GÜNCELLEME (İbre Akıcılığı için)
   // ==========================================
   if (example_lvgl_lock(-1)) {
-    basinc_guncelle((int)pressure_mmHg);
+    basinc_guncelle((int)aktifBasinc);
     example_lvgl_unlock();
   }
 
