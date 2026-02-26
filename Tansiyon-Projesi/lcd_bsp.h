@@ -13,7 +13,6 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_commands.h"
 #include "lvgl.h"
-#include "demos/lv_demos.h"
 #include "esp_check.h"
 #include "driver/gpio.h"
 

@@ -3,7 +3,6 @@
 #include "lcd_config.h"
 #include "FT3168.h"
 #include "read_lcd_id_bsp.h"
-#include <demos/lv_demos.h> 
 
 static SemaphoreHandle_t lvgl_mux = NULL; 
 #define LCD_HOST    SPI2_HOST

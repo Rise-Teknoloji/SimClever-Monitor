@@ -3,6 +3,7 @@
 /* --- PIN TANIMLAMALARI --- */
 const int sensorPin = 7;   // Basınç Sensörü (IO7)
 const int bataryaPin = 4;  // Pil Voltajı (IO4 - Dahili Voltaj Bölücü)
+const int ledPin    = 2;   // LED Çıkışı (IO2)
 
 /* --- KALİBRASYON DEĞERLERİ --- */
 float voltageZero = 0.205; // Senin kalibrasyon değerin
@@ -11,7 +12,9 @@ float pressureMaxRef_mmHg = 200.0;
 float slope; 
 
 /* --- ZAMANLAYICILAR --- */
-unsigned long sonPilOkuma = 0; // Pili sürekli okuyup işlemciyi yormayalım
+unsigned long sonPilOkuma   = 0; // Pili sürekli okuyup işlemciyi yormayalım
+unsigned long sonLedToggle  = 0; // LED blink zamanlayıcısı
+bool ledDurum = false;           // LED'in anlık durumu (açık/kapalı)
 
 void setup() {
   Serial.begin(115200);
@@ -24,6 +27,8 @@ void setup() {
   
   // Pin Modları
   pinMode(sensorPin, INPUT);
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(ledPin, LOW);
   pinMode(bataryaPin, INPUT); // Pil okuma pini
 }
 
@@ -45,6 +50,28 @@ void loop() {
   // Negatif ve parazit değerleri temizle
   if(pressure_mmHg < 2.0) {
     pressure_mmHg = 0.0;
+  }
+
+  // ==========================================
+  // 1.5  LED BLINK (Basınç Aralığına Göre Hız)
+  // ==========================================
+  int blinkInterval = 0; // 0 = LED kapalı
+
+  if      (pressure_mmHg >= 160) blinkInterval = 60;   // Çok hızlı
+  else if (pressure_mmHg >= 120) blinkInterval = 120;  // Hızlı
+  else if (pressure_mmHg >=  80) blinkInterval = 250;  // Orta
+  else if (pressure_mmHg >=  40) blinkInterval = 500;  // Yavaş
+
+  if (blinkInterval > 0) {
+    if (millis() - sonLedToggle >= (unsigned long)blinkInterval) {
+      sonLedToggle = millis();
+      ledDurum = !ledDurum;
+      digitalWrite(ledPin, ledDurum ? HIGH : LOW);
+    }
+  } else {
+    // Aralık dışı → LED kapalı
+    digitalWrite(ledPin, LOW);
+    ledDurum = false;
   }
 
   // ==========================================
