@@ -2,15 +2,39 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
+#include <BLEAdvertisedDevice.h>
 
-/* --- BLE AYARLARI --- */
-#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+/* --- BLE SERVER AYARLARI --- */
+#define SERVICE_UUID          "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID   "beb5483e-36e1-4688-b7f5-ea07361b26a8"  // Basınç alma
+#define TANSIYON_CHAR_UUID    "a1b2c3d4-e5f6-7890-abcd-ef1234567890"  // SYS/DIA/BPM alma
 
+/* --- BLE CLIENT AYARLARI (Stetoskop kontrol) --- */
+#define STETHOSCOPE_SERVICE_UUID   "5908fab1-7ff3-43f2-b353-d10f0644857c"
+#define STETHOSCOPE_CHAR_UUID      "3f39c63d-dc06-4268-b581-8a67d969b192"
+
+/* --- TANSİYON DEĞERLERİ (Ana sistemden gelecek) --- */
+int sys = 0;   // Sistolik basınç (mmHg) - ana sistem gönderecek
+int dia = 0;   // Diyastolik basınç (mmHg) - ana sistem gönderecek
+int bpm = 0;   // Nabız (BPM) - ana sistem gönderecek
+static bool tansiyonGuncel = false; // Ana sistemden veri geldi mi?
+
+/* --- BLE Server Değişkenleri --- */
 BLEServer*         pServer         = NULL;
 BLECharacteristic* pCharacteristic = NULL;
 bool  bleConnected = false;
 int   bleBasinc    = -1;   // -1 = BLE'den veri yok, sensörü kullan
+
+/* --- BLE Client Değişkenleri (Stetoskop) --- */
+static BLEClient* pStetoskopClient = nullptr;
+static BLERemoteCharacteristic* pRemoteChar = nullptr;
+static bool stetoskopConnected = false;
+static bool doConnect          = false;
+static bool doScan             = false;
+static BLEAdvertisedDevice* targetDevice = nullptr;
+static bool sonSesDurumu       = false;  // Önceki ses durumu (değişim takibi)
+static unsigned long sonStetoskopGonder = 0; // Gönderim throttle
+static bool tryPublicAddr      = true;   // Adres tipi cycling
 
 /* --- BLE CALLBACK'LER --- */
 class ServerCallbacks : public BLEServerCallbacks {
@@ -34,8 +58,141 @@ class BasincCallback : public BLECharacteristicCallbacks {
   }
 };
 
+/* --- ANA SİSTEMDEN SYS/DIA/BPM ALMA CALLBACK --- */
+// Format: "SYS,DIA,BPM"  örn: "120,80,75"
+class TansiyonCallback : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* c) {
+    String val = c->getValue();
+    if (val.length() > 0) {
+      // Parse: "120,80,75"
+      int comma1 = val.indexOf(',');
+      int comma2 = val.indexOf(',', comma1 + 1);
+      
+      if (comma1 > 0 && comma2 > comma1) {
+        sys = val.substring(0, comma1).toInt();
+        dia = val.substring(comma1 + 1, comma2).toInt();
+        bpm = val.substring(comma2 + 1).toInt();
+        tansiyonGuncel = true;
+        
+        Serial.printf("Ana Sistem -> SYS: %d, DIA: %d, BPM: %d\n", sys, dia, bpm);
+
+        // Ekranı güncelle
+        if (example_lvgl_lock(10)) {
+          tansiyon_bilgi_guncelle(sys, dia, bpm);
+          example_lvgl_unlock();
+        }
+      } else {
+        Serial.print("Tansiyon parse hatasi: ");
+        Serial.println(val);
+      }
+    }
+  }
+};
+
+/* --- STETOSKOP PAYLOAD OLUŞTURUCU --- */
+String buildStetoskopPayload(int bpmVal) {
+  // Protokole birebir uygun format (Python örneğinden)
+  // NOT: SolAkciger'de ses adı yok (: ile ? arası boş), SagAkciger'de _ var
+  return "Kalp:Tansiyon?" + String(bpmVal) +
+         ";SagAkciger:_?" + String(bpmVal) +
+         ";SolAkciger:?" + String(bpmVal) +
+         ";Bagirsak:_";
+}
+
+/* --- STETOSKOP CLIENT CALLBACK (kopma takibi) --- */
+class StetoskopClientCallbacks : public BLEClientCallbacks {
+  void onConnect(BLEClient* c) {
+    Serial.println("Stetoskop: onConnect callback");
+  }
+  void onDisconnect(BLEClient* c) {
+    stetoskopConnected = false;
+    pRemoteChar = nullptr;
+    doScan = true;
+    Serial.println("Stetoskop: Baglanti koptu! Tekrar aranacak...");
+  }
+};
+
+/* --- STETOSKOP BLE BAĞLANTI FONKSİYONU --- */
+bool connectToStetoskop() {
+  Serial.print("Stetoskopa baglaniliyor: ");
+  Serial.println(targetDevice->getAddress().toString().c_str());
+
+  // Scan'i tamamen temizle
+  BLEDevice::getScan()->clearResults();
+  delay(300);
+
+  pStetoskopClient = BLEDevice::createClient();
+
+  // Adres tipini belirle
+  uint8_t addrType = tryPublicAddr ? BLE_ADDR_PUBLIC : BLE_ADDR_RANDOM;
+  Serial.printf("Adres tipi: %s\n", tryPublicAddr ? "PUBLIC" : "RANDOM");
+
+  if (!pStetoskopClient->connect(targetDevice->getAddress(), addrType)) {
+    Serial.println("Stetoskop: Baglanti basarisiz!");
+    tryPublicAddr = !tryPublicAddr;
+    return false;
+  }
+  Serial.println("Stetoskop: Baglandi!");
+  return true;
+}
+
+/* --- STETOSKOP'A PAYLOAD GÖNDER (bağlan → yaz → çık) --- */
+bool sendStetoskopPayload(int bpmVal) {
+  if (targetDevice == nullptr) return false;
+
+  // 1. Bağlan
+  if (!connectToStetoskop()) return false;
+
+  // 2. Servisi bul
+  BLERemoteService* pRemoteService = pStetoskopClient->getService(BLEUUID(STETHOSCOPE_SERVICE_UUID));
+  if (pRemoteService == nullptr) {
+    Serial.println("Stetoskop: Servis bulunamadi!");
+    pStetoskopClient->disconnect();
+    return false;
+  }
+
+  // 3. Karakteristiği bul
+  BLERemoteCharacteristic* pChar = pRemoteService->getCharacteristic(BLEUUID(STETHOSCOPE_CHAR_UUID));
+  if (pChar == nullptr) {
+    Serial.println("Stetoskop: Karakteristik bulunamadi!");
+    pStetoskopClient->disconnect();
+    return false;
+  }
+
+  // 4. Payload yaz
+  String payload = buildStetoskopPayload(bpmVal);
+  pChar->writeValue(payload.c_str(), payload.length());
+  Serial.print("Stetoskop yazildi: ");
+  Serial.println(payload);
+
+  // 5. Hemen bağlantıyı kes
+  delay(100);
+  pStetoskopClient->disconnect();
+  Serial.println("Stetoskop: Baglanti kesildi (serbest)");
+
+  return true;
+}
+
+/* --- STETOSKOP SCAN CALLBACK --- */
+class StetoskopScanCallbacks : public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice advertisedDevice) {
+    Serial.print("BLE Cihaz bulundu: ");
+    Serial.println(advertisedDevice.toString().c_str());
+
+    // Cihaz adı "RTCOUND" ile başlıyorsa stetoskop olarak tanı
+    if (advertisedDevice.haveName() &&
+        String(advertisedDevice.getName().c_str()).startsWith("RTCOUND20125")) {
+      Serial.println(">>> Stetoskop cihazi bulundu! <<<");
+      BLEDevice::getScan()->stop();
+      targetDevice = new BLEAdvertisedDevice(advertisedDevice);
+      doConnect = true;
+      doScan = false;
+    }
+  }
+};
+
 /* --- PIN TANIMLAMALARI --- */
-const int sensorPin = 7;   // Basınç Sensörü (IO7)
+const int sensorPin = 1;   // Basınç Sensörü (IO7)
 const int bataryaPin = 4;  // Pil Voltajı (IO4 - Dahili Voltaj Bölücü)
 const int ledPin    = 2;   // LED Çıkışı (IO2)
 
@@ -70,24 +227,47 @@ void setup() {
   Serial.printf("Heap (baslangic): %d byte\n", ESP.getFreeHeap());
 
   // --- BLE Peripheral Başlat (EKRANDAN ÖNCE!) ---
-  BLEDevice::init("SimClever");
+  BLEDevice::init("C-press_v1.0");
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
 
   BLEService* pService = pServer->createService(SERVICE_UUID);
+  
+  // Karakteristik 1: Basınç alma
   pCharacteristic = pService->createCharacteristic(
                       CHARACTERISTIC_UUID,
                       BLECharacteristic::PROPERTY_WRITE
                     );
   pCharacteristic->setCallbacks(new BasincCallback());
+
+  // Karakteristik 2: SYS/DIA/BPM alma (Ana sistemden)
+  BLECharacteristic* pTansiyonChar = pService->createCharacteristic(
+                      TANSIYON_CHAR_UUID,
+                      BLECharacteristic::PROPERTY_WRITE
+                    );
+  pTansiyonChar->setCallbacks(new TansiyonCallback());
+
   pService->start();
 
   BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
   pAdvertising->start();
-  Serial.println("BLE: SimClever yayinda!");
-  Serial.printf("Heap (BLE sonrasi): %d byte\n", ESP.getFreeHeap());
+  Serial.println("BLE: C-press yayinda!");
+  Serial.printf("Heap (BLE Server sonrasi): %d byte\n", ESP.getFreeHeap());
+
+  // --- BLE Client Scan Başlat (Stetoskop aranıyor) ---
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new StetoskopScanCallbacks());
+  pBLEScan->setInterval(1349);
+  pBLEScan->setWindow(449);
+  pBLEScan->setActiveScan(true);
+  pBLEScan->start(5, false);  // 5 saniye scan, non-blocking
+  Serial.println("BLE Client: Stetoskop araniyor...");
+  Serial.printf("Heap (BLE Client sonrasi): %d byte\n", ESP.getFreeHeap());
+
+  // --- Sabit tansiyon değerleri (test) ---
+  Serial.printf("Test Degerleri -> SYS: %d, DIA: %d, BPM: %d\n", sys, dia, bpm);
 
   // --- Ekranı Başlat (BLE'den SONRA) ---
   lcd_lvgl_Init();
@@ -95,6 +275,23 @@ void setup() {
 }
 
 void loop() {
+  // ==========================================
+  // 0. STETOSKOP SCAN YÖNETİMİ
+  // ==========================================
+  // Scan'da cihaz bulunduysa, adresini kaydet (bağlanmayı sonraya bırak)
+  if (doConnect) {
+    Serial.println("Stetoskop: Cihaz adresi kaydedildi, hazir.");
+    doConnect = false;
+    stetoskopConnected = true; // Adres hazır, gönderim yapabilir
+  }
+
+  // Cihaz bulunamadıysa tekrar scan
+  if (!stetoskopConnected && doScan) {
+    BLEDevice::getScan()->start(5, false);
+    doScan = false;
+    Serial.println("BLE Client: Tekrar scan baslatildi...");
+  }
+
   // ==========================================
   // 1. BASINÇ SENSÖRÜNÜ OKUMA (Hızlı olmalı)
   // ==========================================
@@ -146,7 +343,7 @@ void loop() {
   // ==========================================
   // 2. PİL DURUMUNU OKUMA (Saniyede 1 kez yeterli)
   // ==========================================
-  if(millis() - sonPilOkuma > 1000) {
+  if(millis() - sonPilOkuma > 15000) {
     sonPilOkuma = millis();
     
     // --- TİTREMEYİ ENGELLEMEK İÇİN ORTALAMA ALIYORUZ ---
@@ -193,6 +390,41 @@ void loop() {
     if (example_lvgl_lock(10)) {  // 10ms timeout (bloklamayı önle)
       basinc_guncelle(yeniBasinc);
       example_lvgl_unlock();
+    }
+  }
+
+  // ==========================================
+  // 4. STETOSKOP SES KONTROLÜ (Korotkoff)
+  //    Bağlan → Yaz → Çık modeli
+  //    Sadece ana sistemden SYS/DIA/BPM gelmişse aktif
+  // ==========================================
+  if (stetoskopConnected && targetDevice != nullptr && tansiyonGuncel) {
+    // Basınç-tansiyon karşılaştırması
+    bool sesDuyulmali = (aktifBasinc > dia) && (aktifBasinc < sys);
+    bool durumDegisti = (sesDuyulmali != sonSesDurumu);
+
+    if (durumDegisti) {
+      sonSesDurumu = sesDuyulmali;
+
+      if (!sesDuyulmali) {
+        // SES KAPALI → BPM=0 gönder (stetoskopu sustur)
+        Serial.print("Stetoskop SES KAPALI | Basinc: ");
+        Serial.println((int)aktifBasinc);
+
+        if (!sendStetoskopPayload(0)) {
+          Serial.println("Stetoskop: Mute gonderimi basarisiz!");
+        }
+      } else {
+        // SES ACIK → BPM gönder (stetoskopu aç)
+        Serial.print("Stetoskop SES ACIK | Basinc: ");
+        Serial.print((int)aktifBasinc);
+        Serial.print(" | BPM: ");
+        Serial.println(bpm);
+
+        if (!sendStetoskopPayload(bpm)) {
+          Serial.println("Stetoskop: Unmute gonderimi basarisiz!");
+        }
+      }
     }
   }
 

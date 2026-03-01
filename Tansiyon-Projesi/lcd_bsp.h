@@ -34,6 +34,9 @@ void pil_guncelle(int yuzde);
 // Şarj durumunu gösteren fonksiyon
 void sarj_durumu_goster(bool sarj_oluyor);
 
+// Tansiyon bilgilerini güncelleyen fonksiyon (SYS/DIA/BPM)
+void tansiyon_bilgi_guncelle(int sys_val, int dia_val, int bpm_val);
+
 // Kilit mekanizmaları
 bool example_lvgl_lock(int timeout_ms);
 void example_lvgl_unlock(void);

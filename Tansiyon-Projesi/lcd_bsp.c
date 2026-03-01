@@ -23,6 +23,7 @@ void example_lvgl_rounder_cb(struct _lv_disp_drv_t *disp_drv, lv_area_t *area);
 void pil_guncelle(int yuzde);
 void basinc_guncelle(int deger);
 void sarj_durumu_goster(bool sarj_oluyor);
+void tansiyon_bilgi_guncelle(int sys_val, int dia_val, int bpm_val);
 
 /* --- TANSİYON ALETİ DEĞİŞKENLERİ --- */
 static lv_obj_t * meter;
@@ -32,6 +33,7 @@ static lv_obj_t * bar_pil;
 static lv_obj_t * label_pil_text;
 static lv_obj_t * pil_basi;
 static lv_obj_t * sarj_ikonu;
+static lv_obj_t * label_tansiyon_bilgi;
 
 /* --- EKRAN SÜRÜCÜ KOMUTLARI --- */
 static const sh8601_lcd_init_cmd_t sh8601_lcd_init_cmds[] = 
@@ -109,6 +111,12 @@ void basinc_guncelle(int deger)
     if(meter == NULL || label_basinc == NULL) return;
     lv_meter_set_indicator_value(meter, indic, deger);
     lv_label_set_text_fmt(label_basinc, "%d", deger);
+}
+
+void tansiyon_bilgi_guncelle(int sys_val, int dia_val, int bpm_val)
+{
+    if(label_tansiyon_bilgi == NULL) return;
+    lv_label_set_text_fmt(label_tansiyon_bilgi, "SYS:%d  DIA:%d  BPM:%d", sys_val, dia_val, bpm_val);
 }
 
 /* --- KADRAN TASARIMI --- */
@@ -250,6 +258,15 @@ lv_obj_center(label_pil_text);
     #endif
     lv_obj_set_style_text_color(label_basinc, lv_color_black(), 0);
     lv_obj_align(label_basinc, LV_ALIGN_CENTER, 0, -10); 
+
+    /* 6. TANSİYON BİLGİ ETİKETİ (SYS/DIA/BPM) */
+    label_tansiyon_bilgi = lv_label_create(meter);
+    lv_label_set_text(label_tansiyon_bilgi, "SYS:--  DIA:--  BPM:--");
+    lv_obj_set_style_text_color(label_tansiyon_bilgi, lv_palette_darken(LV_PALETTE_GREY, 2), 0);
+    #if LV_FONT_MONTSERRAT_14
+        lv_obj_set_style_text_font(label_tansiyon_bilgi, &lv_font_montserrat_14, 0);
+    #endif
+    lv_obj_align(label_tansiyon_bilgi, LV_ALIGN_CENTER, 0, 60);
 }
 
 /* --- BAŞLATMA AYARLARI --- */
@@ -319,6 +336,9 @@ void lcd_lvgl_Init(void)
   disp_drv.rotated = LV_DISP_ROT_270;  
 
   lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
+
+  // I2C dokunmatik ekran sürücüsünü başlat
+  Touch_Init();
 
   static lv_indev_drv_t indev_drv;    
   lv_indev_drv_init(&indev_drv);
