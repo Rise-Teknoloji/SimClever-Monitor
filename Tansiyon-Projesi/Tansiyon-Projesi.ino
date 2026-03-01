@@ -1,4 +1,5 @@
 #include "lcd_bsp.h"
+#include "ble_ota.h"
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
@@ -249,11 +250,14 @@ void setup() {
 
   pService->start();
 
+  // --- BLE OTA Servisini Başlat ---
+  ble_ota_setup(pServer);
+
   BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
   pAdvertising->start();
-  Serial.println("BLE: C-press yayinda!");
+  Serial.println("BLE: C-press_v1.0 yayinda!");
   Serial.printf("Heap (BLE Server sonrasi): %d byte\n", ESP.getFreeHeap());
 
   // --- BLE Client Scan Başlat (Stetoskop aranıyor) ---
@@ -275,6 +279,11 @@ void setup() {
 }
 
 void loop() {
+  // ==========================================
+  // 0. BLE OTA KONTROL (Reboot vs.)
+  // ==========================================
+  ble_ota_loop();
+
   // ==========================================
   // 0. STETOSKOP SCAN YÖNETİMİ
   // ==========================================
