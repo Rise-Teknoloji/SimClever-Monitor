@@ -50,6 +50,10 @@ unsigned long sonPilOkuma   = 0; // Pili sürekli okuyup işlemciyi yormayalım
 unsigned long sonLedToggle  = 0; // LED blink zamanlayıcısı
 bool ledDurum = false;           // LED'in anlık durumu (açık/kapalı)
 
+/* --- BASINÇ GÜNCELLEME THROTTLE --- */
+unsigned long sonBasincOkuma = 0;  // Son ekran güncelleme zamanı
+int           sonBasincDeger = -1; // Önceki basınç değeri (değişim kontrolü)
+
 void setup() {
   Serial.begin(115200);
   delay(500); // Serial Monitor'ün açılması için bekle
@@ -180,12 +184,17 @@ void loop() {
   }
 
   // ==========================================
-  // 3. EKRANI GÜNCELLEME (İbre Akıcılığı için)
+  // 3. EKRANI GÜNCELLEME (Yırtılmayı önlemek için throttle)
   // ==========================================
-  if (example_lvgl_lock(-1)) {
-    basinc_guncelle((int)aktifBasinc);
-    example_lvgl_unlock();
+  int yeniBasinc = (int)aktifBasinc;
+  if (yeniBasinc != sonBasincDeger && (millis() - sonBasincOkuma >= 50)) {
+    sonBasincOkuma = millis();
+    sonBasincDeger = yeniBasinc;
+    if (example_lvgl_lock(10)) {  // 10ms timeout (bloklamayı önle)
+      basinc_guncelle(yeniBasinc);
+      example_lvgl_unlock();
+    }
   }
 
-  delay(5); // Çok kısa bekleme (Akıcılık için)
+  delay(5); // Çok kısa bekleme
 }
