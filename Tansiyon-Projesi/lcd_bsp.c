@@ -39,6 +39,7 @@ static lv_obj_t * label_tansiyon_bilgi;
 static const sh8601_lcd_init_cmd_t sh8601_lcd_init_cmds[] = 
 {
   {0x11, (uint8_t []){0x00}, 0, 120},
+  {0x36, (uint8_t []){0x68}, 1, 0},   // MADCTL: HW 270° rotation + BGR (SW rotate kaldırıldı)
   {0x44, (uint8_t []){0x01, 0xD1}, 2, 0},
   {0x35, (uint8_t []){0x00}, 1, 0},
   {0x53, (uint8_t []){0x20}, 1, 10},
@@ -49,6 +50,7 @@ static const sh8601_lcd_init_cmd_t sh8601_lcd_init_cmds[] =
 static const sh8601_lcd_init_cmd_t co5300_lcd_init_cmds[] = 
 {
   {0x11, (uint8_t []){0x00}, 0, 80},   
+  {0x36, (uint8_t []){0xA8}, 1, 0},   // MADCTL: HW 270° rotation + BGR
   {0xC4, (uint8_t []){0x80}, 1, 0},
   {0x53, (uint8_t []){0x20}, 1, 1},
   {0x63, (uint8_t []){0xFF}, 1, 1},
@@ -317,12 +319,11 @@ void lcd_lvgl_Init(void)
   lv_init();
   lv_color_t *buf1 = heap_caps_malloc(EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT * sizeof(lv_color_t), MALLOC_CAP_DMA);
   assert(buf1);
-  // BLE ile birlikte çift buffer'a yeterli DMA bellek yok → Tek buffer modu
-  // NOT: Eğer heap yeterliyse çift buffer yırtılmayı büyük ölçüde azaltır.
-  // Denemek için aşağıdaki 2 satırı aktif edin ve üstteki lv_disp_draw_buf_init'i silin:
-  // lv_color_t *buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT * sizeof(lv_color_t), MALLOC_CAP_DMA);
-  // lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT);
-  lv_disp_draw_buf_init(&disp_buf, buf1, NULL, EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT);
+  // Çift buffer: Tearing'i önlemek için iki buffer kullanılıyor.
+  // Buffer yüksekliği V_RES/10 ile küçültüldü (her biri ~43KB, toplam ~86KB DMA).
+  lv_color_t *buf2 = heap_caps_malloc(EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT * sizeof(lv_color_t), MALLOC_CAP_DMA);
+  assert(buf2);
+  lv_disp_draw_buf_init(&disp_buf, buf1, buf2, EXAMPLE_LCD_H_RES * EXAMPLE_LVGL_BUF_HEIGHT);
   lv_disp_drv_init(&disp_drv);
   disp_drv.hor_res = EXAMPLE_LCD_H_RES;
   disp_drv.ver_res = EXAMPLE_LCD_V_RES;
@@ -331,9 +332,10 @@ void lcd_lvgl_Init(void)
   disp_drv.draw_buf = &disp_buf;
   disp_drv.user_data = panel_handle;
 
-  // DÖNDÜRME AYARLARI
-  disp_drv.sw_rotate = 1;
-  disp_drv.rotated = LV_DISP_ROT_270;  
+  // DÖNDÜRME: Hardware rotation kullanılıyor (MADCTL 0xA8 ile init commands'da)
+  // SW rotation kaldırıldı — CPU yükünü devasa ölçüde azaltır
+  // disp_drv.sw_rotate = 1;
+  // disp_drv.rotated = LV_DISP_ROT_270;
 
   lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
 
@@ -443,8 +445,9 @@ static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
   uint8_t win = getTouch(&tp_x,&tp_y);
   if(win)
   {
-    data->point.x = tp_x;
-    data->point.y = tp_y;
+    // HW rotation 270° ile touch koordinat dönüşümü
+    data->point.x = (EXAMPLE_LCD_H_RES - 1) - tp_y;
+    data->point.y = tp_x;
     data->state = LV_INDEV_STATE_PRESSED;
   }
   else

@@ -37,6 +37,12 @@ static bool sonSesDurumu       = false;  // Önceki ses durumu (değişim takibi
 static unsigned long sonStetoskopGonder = 0; // Gönderim throttle
 static bool tryPublicAddr      = true;   // Adres tipi cycling
 
+/* --- FreeRTOS Stetoskop Task (Non-blocking BLE Client) --- */
+static QueueHandle_t stetoskopQueue = NULL;
+#define STETOSKOP_QUEUE_LEN  2
+#define STETOSKOP_TASK_STACK 4096
+#define STETOSKOP_TASK_PRIO  1
+
 /* --- BLE CALLBACK'LER --- */
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* s)    { bleConnected = true;  Serial.println("BLE: Baglandi"); }
@@ -76,12 +82,7 @@ class TansiyonCallback : public BLECharacteristicCallbacks {
         tansiyonGuncel = true;
         
         Serial.printf("Ana Sistem -> SYS: %d, DIA: %d, BPM: %d\n", sys, dia, bpm);
-
-        // Ekranı güncelle
-        if (example_lvgl_lock(10)) {
-          tansiyon_bilgi_guncelle(sys, dia, bpm);
-          example_lvgl_unlock();
-        }
+        // NOT: LVGL güncellemesi loop() içinde yapılıyor (BLE callback'te mutex kullanmıyoruz)
       } else {
         Serial.print("Tansiyon parse hatasi: ");
         Serial.println(val);
@@ -172,6 +173,20 @@ bool sendStetoskopPayload(int bpmVal) {
   Serial.println("Stetoskop: Baglanti kesildi (serbest)");
 
   return true;
+}
+
+/* --- STETOSKOP FREERTOS TASK (Non-blocking BLE Client) --- */
+static void stetoskop_task(void *arg) {
+  int bpmToSend;
+  for (;;) {
+    // Queue'dan BPM değeri gelene kadar bekle (blocking, ama kendi task'ında)
+    if (xQueueReceive(stetoskopQueue, &bpmToSend, portMAX_DELAY) == pdTRUE) {
+      Serial.printf("Stetoskop Task: BPM=%d gonderiliyor...\n", bpmToSend);
+      if (!sendStetoskopPayload(bpmToSend)) {
+        Serial.println("Stetoskop Task: Gonderim basarisiz!");
+      }
+    }
+  }
 }
 
 /* --- STETOSKOP SCAN CALLBACK --- */
@@ -270,6 +285,12 @@ void setup() {
   Serial.println("BLE Client: Stetoskop araniyor...");
   Serial.printf("Heap (BLE Client sonrasi): %d byte\n", ESP.getFreeHeap());
 
+  // --- Stetoskop FreeRTOS Task ve Queue ---
+  stetoskopQueue = xQueueCreate(STETOSKOP_QUEUE_LEN, sizeof(int));
+  assert(stetoskopQueue);
+  xTaskCreate(stetoskop_task, "STETOSKOP", STETOSKOP_TASK_STACK, NULL, STETOSKOP_TASK_PRIO, NULL);
+  Serial.println("Stetoskop Task: Olusturuldu");
+
   // --- Sabit tansiyon değerleri (test) ---
   Serial.printf("Test Degerleri -> SYS: %d, DIA: %d, BPM: %d\n", sys, dia, bpm);
 
@@ -360,7 +381,7 @@ void loop() {
     int batSamples = 20; // 20 kere oku, ortalamasını al
     for(int k=0; k < batSamples; k++) {
         batSum += analogRead(bataryaPin);
-        delay(2); // Okumalar arası minik bekleme
+        delayMicroseconds(200); // 200us × 20 = 4ms (eski: 2ms × 20 = 40ms)
     }
     
     // Waveshare şemasına göre (1/3 Voltaj Bölücü)
@@ -376,8 +397,8 @@ void loop() {
     // Sınırlandırma (Yüzde 0-100 dışına çıkmasın)
     yuzde = constrain(yuzde, 0, 100);
 
-    // Ekrana Gönder (Kilit mekanizması ile)
-    if (example_lvgl_lock(-1)) {
+    // Ekrana Gönder (10ms timeout — sonsuz bekleme önlendi)
+    if (example_lvgl_lock(10)) {
       pil_guncelle(yuzde);
       example_lvgl_unlock();
     }
@@ -403,8 +424,18 @@ void loop() {
   }
 
   // ==========================================
+  // 3.5 TANSİYON BİLGİ GÜNCELLEME (BLE callback'ten flag ile)
+  // ==========================================
+  if (tansiyonGuncel) {
+    if (example_lvgl_lock(10)) {
+      tansiyon_bilgi_guncelle(sys, dia, bpm);
+      example_lvgl_unlock();
+    }
+  }
+
+  // ==========================================
   // 4. STETOSKOP SES KONTROLÜ (Korotkoff)
-  //    Bağlan → Yaz → Çık modeli
+  //    Queue ile ayrı FreeRTOS task'a gönderim (NON-BLOCKING)
   //    Sadece ana sistemden SYS/DIA/BPM gelmişse aktif
   // ==========================================
   if (stetoskopConnected && targetDevice != nullptr && tansiyonGuncel) {
@@ -420,8 +451,9 @@ void loop() {
         Serial.print("Stetoskop SES KAPALI | Basinc: ");
         Serial.println((int)aktifBasinc);
 
-        if (!sendStetoskopPayload(0)) {
-          Serial.println("Stetoskop: Mute gonderimi basarisiz!");
+        int muteVal = 0;
+        if (xQueueSend(stetoskopQueue, &muteVal, 0) != pdTRUE) {
+          Serial.println("Stetoskop: Queue dolu, mute gonderilemedi!");
         }
       } else {
         // SES ACIK → BPM gönder (stetoskopu aç)
@@ -430,8 +462,9 @@ void loop() {
         Serial.print(" | BPM: ");
         Serial.println(bpm);
 
-        if (!sendStetoskopPayload(bpm)) {
-          Serial.println("Stetoskop: Unmute gonderimi basarisiz!");
+        int bpmVal = bpm;
+        if (xQueueSend(stetoskopQueue, &bpmVal, 0) != pdTRUE) {
+          Serial.println("Stetoskop: Queue dolu, unmute gonderilemedi!");
         }
       }
     }
