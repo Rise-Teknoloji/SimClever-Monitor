@@ -39,7 +39,7 @@ static lv_obj_t * label_tansiyon_bilgi;
 static const sh8601_lcd_init_cmd_t sh8601_lcd_init_cmds[] = 
 {
   {0x11, (uint8_t []){0x00}, 0, 120},
-  {0x36, (uint8_t []){0x68}, 1, 0},   // MADCTL: HW 270° rotation + BGR (SW rotate kaldırıldı)
+  {0x36, (uint8_t []){0xA8}, 1, 0},   // MADCTL: HW 90° rotation + BGR (270°+180° flip)
   {0x44, (uint8_t []){0x01, 0xD1}, 2, 0},
   {0x35, (uint8_t []){0x00}, 1, 0},
   {0x53, (uint8_t []){0x20}, 1, 10},
@@ -50,7 +50,7 @@ static const sh8601_lcd_init_cmd_t sh8601_lcd_init_cmds[] =
 static const sh8601_lcd_init_cmd_t co5300_lcd_init_cmds[] = 
 {
   {0x11, (uint8_t []){0x00}, 0, 80},   
-  {0x36, (uint8_t []){0xA8}, 1, 0},   // MADCTL: HW 270° rotation + BGR
+  {0x36, (uint8_t []){0x68}, 1, 0},   // MADCTL: HW 90° rotation + BGR (270°+180° flip)
   {0xC4, (uint8_t []){0x80}, 1, 0},
   {0x53, (uint8_t []){0x20}, 1, 1},
   {0x63, (uint8_t []){0xFF}, 1, 1},
@@ -417,10 +417,12 @@ static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, 
 static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_map)
 {
   esp_lcd_panel_handle_t panel_handle = (esp_lcd_panel_handle_t) drv->user_data;
-  const int offsetx1 = (READ_LCD_ID == SH8601_ID) ? area->x1 : area->x1 + 0x06;
-  const int offsetx2 = (READ_LCD_ID == SH8601_ID) ? area->x2 : area->x2 + 0x06;
-  const int offsety1 = area->y1;
-  const int offsety2 = area->y2;
+  // MADCTL MV=1 (Row/Column Exchange) aktif olduğundan,
+  // CO5300'ün fiziksel X offset'i (0x06) artık Y eksenine uygulanmalı.
+  const int offsetx1 = area->x1;
+  const int offsetx2 = area->x2;
+  const int offsety1 = (READ_LCD_ID == SH8601_ID) ? area->y1 : area->y1 + 0x06;
+  const int offsety2 = (READ_LCD_ID == SH8601_ID) ? area->y2 : area->y2 + 0x06;
 
   esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, color_map);
 }
@@ -445,9 +447,9 @@ static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
   uint8_t win = getTouch(&tp_x,&tp_y);
   if(win)
   {
-    // HW rotation 270° ile touch koordinat dönüşümü
-    data->point.x = (EXAMPLE_LCD_H_RES - 1) - tp_y;
-    data->point.y = tp_x;
+    // HW rotation 90° ile touch koordinat dönüşümü (270°+180° flip)
+    data->point.x = tp_y;
+    data->point.y = (EXAMPLE_LCD_V_RES - 1) - tp_x;
     data->state = LV_INDEV_STATE_PRESSED;
   }
   else
